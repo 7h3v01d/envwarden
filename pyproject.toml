@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools==84.2.1"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "envwarden"
+version = "4.2.1"
+description = "Governed Python virtual-environment manager (uv-first, PyQt6)"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+authors = [{ name = "Leon Priest" }]
+dependencies = ["PyQt6>=6.6", "packaging>=25"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[dependency-groups]
+# installed (hash-verified) from requirements-lock.txt so the editable install can use --no-build-isolation
+build = ["setuptools==84.2.1"]
+
+[project.urls]
+Homepage = "https://github.com/7h3v01d/envwarden"
+
+[project.scripts]
+envwarden-cli = "envwarden.cli:_entry"
+
+[project.gui-scripts]
+envwarden = "envwarden.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-p no:cacheprovider"

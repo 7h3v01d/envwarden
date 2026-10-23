@@ -1,0 +1,4 @@
+# Loose, human-readable list. Installs use requirements-lock.txt (hash-pinned); see README.
+PyQt6>=6.6
+packaging>=25
+pytest>=8

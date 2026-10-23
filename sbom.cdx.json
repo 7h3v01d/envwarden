@@ -1,0 +1,83 @@
+{
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.5",
+  "version": 1,
+  "serialNumber": "urn:uuid:3bfe4c2a-b93c-4eb1-8b06-484ac5260beb",
+  "metadata": {
+    "timestamp": "2026-10-23T02:51:38.708087061Z",
+    "tools": [
+      {
+        "vendor": "Astral Software Inc.",
+        "name": "uv",
+        "version": "0.11.32"
+      }
+    ],
+    "component": {
+      "type": "library",
+      "bom-ref": "envwarden-1@4.2.1",
+      "name": "envwarden",
+      "version": "4.2.1",
+      "properties": [
+        {
+          "name": "uv:package:is_project_root",
+          "value": "true"
+        }
+      ]
+    }
+  },
+  "components": [
+    {
+      "type": "library",
+      "bom-ref": "packaging-2@26.3",
+      "name": "packaging",
+      "version": "26.3",
+      "purl": "pkg:pypi/packaging@26.3"
+    },
+    {
+      "type": "library",
+      "bom-ref": "pyqt6-3@6.11.0",
+      "name": "pyqt6",
+      "version": "6.11.0",
+      "purl": "pkg:pypi/pyqt6@6.11.0"
+    },
+    {
+      "type": "library",
+      "bom-ref": "pyqt6-qt6-4@6.11.2",
+      "name": "pyqt6-qt6",
+      "version": "6.11.2",
+      "purl": "pkg:pypi/pyqt6-qt6@6.11.2"
+    },
+    {
+      "type": "library",
+      "bom-ref": "pyqt6-sip-5@13.13.0",
+      "name": "pyqt6-sip",
+      "version": "13.13.0",
+      "purl": "pkg:pypi/pyqt6-sip@13.13.0"
+    }
+  ],
+  "dependencies": [
+    {
+      "ref": "envwarden-1@4.2.1",
+      "dependsOn": [
+        "packaging-2@26.3",
+        "pyqt6-3@6.11.0"
+      ]
+    },
+    {
+      "ref": "packaging-2@26.3"
+    },
+    {
+      "ref": "pyqt6-3@6.11.0",
+      "dependsOn": [
+        "pyqt6-qt6-4@6.11.2",
+        "pyqt6-sip-5@13.13.0"
+      ]
+    },
+    {
+      "ref": "pyqt6-qt6-4@6.11.2"
+    },
+    {
+      "ref": "pyqt6-sip-5@13.13.0"
+    }
+  ]
+}
