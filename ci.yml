@@ -1,0 +1,115 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Leon Priest (GitHub: 7h3v01d)
+#
+# Test matrix: Windows + Linux × Python 3.11 / 3.13 × uv / pip backends.
+# Third-party actions are pinned to full commit SHAs (tag in the comment).
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+      - name: Ruff
+        run: uvx ruff@0.16.9 check --select E,F,W,B --ignore E501 src tests
+      - name: Dependency lock is current (uv.lock, requirements-lock.txt, SBOM)
+        shell: bash
+        run: |
+          uv lock --check
+          uv export --frozen --no-emit-project --all-extras --group build --format requirements.txt -o /tmp/req.txt
+          uv export --frozen --no-dev --format cyclonedx1.5 -o /tmp/sbom.json
+          diff <(grep -v '^#' requirements-lock.txt) <(grep -v '^#' /tmp/req.txt) || { echo "requirements-lock.txt is stale: run relock.bat"; exit 1; }
+          python3 - <<'PY'
+          import json
+          names = lambda p: sorted((c["name"], c.get("version")) for c in json.load(open(p))["components"])
+          assert names("sbom.cdx.json") == names("/tmp/sbom.json"), "sbom.cdx.json is stale: run relock.bat"
+          PY
+      - name: SPDX headers and no legacy branding
+        shell: bash
+        run: |
+          missing=$(grep -L "SPDX-License-Identifier: Apache-2.0" $(find src tests -name '*.py') || true)
+          if [ -n "$missing" ]; then echo "Missing SPDX header:"; echo "$missing"; exit 1; fi
+          if grep -rni "keystone" src tests README.md CHANGELOG.md; then echo "Legacy branding found"; exit 1; fi
+
+  test:
+    name: test (${{ matrix.os }}, py${{ matrix.python }}, ${{ matrix.backend }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+        python: ["3.11", "3.13"]
+        backend: [uv, pip]
+    env:
+      QT_QPA_PLATFORM: offscreen
+      ENVWARDEN_BACKEND: ${{ matrix.backend }}
+      PYTHONUTF8: "1"
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+      # one cell per OS also runs the live OSV.dev / PyPI checks and the revert harness
+      FULL_CELL: ${{ matrix.python == '3.13' && matrix.backend == 'uv' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Install uv (uv backend only — pip cells must not see uv on PATH)
+        if: matrix.backend == 'uv'
+        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+
+      - name: Qt runtime libraries (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends libegl1 libgl1 libxkbcommon0 libfontconfig1 libdbus-1-3
+
+      - name: Install EnvWarden from the hash-locked set (same path as setup.bat)
+        run: |
+          python -m pip install --require-hashes -r requirements-lock.txt
+          python -m pip install --no-deps --no-build-isolation -e .
+          python -m pip check
+
+      - name: Environment report
+        run: |
+          python -c "import sys, platform; print(sys.version); print(platform.platform())"
+          python -c "from envwarden.backend import detect_backend; import os; print('backend:', detect_backend(os.environ['ENVWARDEN_BACKEND']).label)"
+
+      - name: Test suite
+        env:
+          ENVWARDEN_NETWORK_TESTS: ${{ env.FULL_CELL == 'true' && '1' || '0' }}
+        run: python -m pytest -q -rs --junitxml=junit.xml tests
+
+      - name: Revert-proof harness
+        if: env.FULL_CELL == 'true'
+        env:
+          ENVWARDEN_NETWORK_TESTS: "1"
+        run: python tests/revert_check.py
+
+      - name: Upload test report
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: junit-${{ matrix.os }}-py${{ matrix.python }}-${{ matrix.backend }}
+          path: junit.xml
+          if-no-files-found: ignore
+          retention-days: 14
