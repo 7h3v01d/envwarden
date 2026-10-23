@@ -85,15 +85,118 @@ def test_s8_forged_trash_records_cannot_delete_outside_folders(mgr, tmp_path):
         assert (target / "lib").exists() and os.path.islink(link)
 
 
-def test_s8b_genuine_tomb_is_still_purged(mgr, tmp_path):
+def _genuine_tomb(tmp_path: Path) -> tuple[Path, Path, str]:
+    """A tomb made exactly the way EnvWarden makes one: a venv-shaped folder retired by core._retire."""
     original = tmp_path / "proj" / ".venv"
-    tomb = _tomb(original)
-    (tomb / "lib" / "site-packages").mkdir(parents=True)
-    (tomb / "pyvenv.cfg").write_text("home = x\n", encoding="utf-8")
-    _forge_trash(mgr, [{"path": str(tomb), "original": str(original), "kind": "project", "created": "x"}])
+    (original / "lib" / "site-packages").mkdir(parents=True)
+    (original / "pyvenv.cfg").write_text("home = x\n", encoding="utf-8")
+    tomb, token = core._retire(original)
+    assert token and (tomb / core.OWNER_MARKER).exists()
+    return original, tomb, token
+
+
+def _record(tomb: Path, original: Path, token: str | None) -> dict:
+    rec = {"path": str(tomb), "original": str(original), "kind": "project", "created": "x"}
+    if token is not None:
+        rec["token"] = token
+    return rec
+
+
+def test_s8b_genuine_tomb_is_still_purged(mgr, tmp_path):
+    original, tomb, token = _genuine_tomb(tmp_path)
+    _forge_trash(mgr, [_record(tomb, original, token)])
     res = mgr.purge_trash()
     assert res.ok, res.message
     assert not tomb.exists() and mgr._registry_data()["trash"] == []
+
+
+# S8c–S8f — the reviewer's 4.2.1 bypass and its variants: venv-shaped, well-named, correctly placed
+def _venv_shaped_victim(tmp_path: Path) -> tuple[Path, Path, Path]:
+    original = tmp_path / "outside" / "victim"
+    tomb = _tomb(original)
+    (tomb / "lib").mkdir(parents=True)
+    (tomb / "pyvenv.cfg").write_text("home = x\n", encoding="utf-8")
+    precious = tomb / "lib" / "precious.bin"
+    precious.write_text("precious", encoding="utf-8")
+    return original, tomb, precious
+
+
+def test_s8c_forged_venv_shaped_tomb_without_token_survives(mgr, tmp_path):
+    original, tomb, precious = _venv_shaped_victim(tmp_path)
+    _forge_trash(mgr, [_record(tomb, original, None)])            # the exact 4.2.1 bypass
+    res = mgr.purge_trash()
+    assert not res.ok and tomb.exists() and precious.exists()
+    assert "ownership token" in res.message
+
+
+def test_s8d_tomb_with_wrong_token_survives(mgr, tmp_path):
+    original, tomb, precious = _venv_shaped_victim(tmp_path)
+    (tomb / core.OWNER_MARKER).write_text(json.dumps({"format": 1, "token": "a" * 64, "original": str(original)}),
+                                          encoding="utf-8")
+    _forge_trash(mgr, [_record(tomb, original, "b" * 64)])
+    res = mgr.purge_trash()
+    assert not res.ok and precious.exists() and "does not match" in res.message
+
+
+def test_s8e_correct_token_but_wrong_original_survives(mgr, tmp_path):
+    original, tomb, precious = _venv_shaped_victim(tmp_path)
+    (tomb / core.OWNER_MARKER).write_text(json.dumps({"format": 1, "token": "c" * 64,
+                                                      "original": str(tmp_path / "somewhere" / "else")}),
+                                          encoding="utf-8")
+    _forge_trash(mgr, [_record(tomb, original, "c" * 64)])
+    res = mgr.purge_trash()
+    assert not res.ok and precious.exists() and "different original" in res.message
+
+
+def test_s8e2_marker_that_is_a_symlink_survives(mgr, tmp_path):
+    original, tomb, precious = _venv_shaped_victim(tmp_path)
+    real = tmp_path / "real-marker.json"
+    real.write_text(json.dumps({"format": 1, "token": "d" * 64, "original": str(original)}), encoding="utf-8")
+    try:
+        os.symlink(real, tomb / core.OWNER_MARKER)
+    except OSError:
+        pytest.skip("symlinks not permitted here")
+    _forge_trash(mgr, [_record(tomb, original, "d" * 64)])
+    res = mgr.purge_trash()
+    assert not res.ok and precious.exists() and "regular file" in res.message
+
+
+def test_s8f_genuine_tomb_with_correct_token_is_deleted_and_marker_goes_last(mgr, tmp_path, monkeypatch):
+    original, tomb, token = _genuine_tomb(tmp_path)
+    (tomb / "lib" / "locked.pyd").write_text("x", encoding="utf-8")
+    real_unlink = os.unlink
+    order: list[str] = []
+
+    def unlink(p, *a, dir_fd=None, **k):
+        name = Path(os.fsdecode(p)).name
+        order.append(name)
+        if name == "locked.pyd" and getattr(unlink, "locked", True):
+            raise PermissionError(13, "in use", os.fsdecode(p))
+        return real_unlink(p, *a, dir_fd=dir_fd, **k) if dir_fd is not None else real_unlink(p, *a, **k)
+
+    monkeypatch.setattr(os, "unlink", unlink)
+    _forge_trash(mgr, [_record(tomb, original, token)])
+    res = mgr.purge_trash()
+    assert not res.ok and "1 still locked" in res.message
+    assert (tomb / core.OWNER_MARKER).exists(), "marker must outlive locked leftovers"
+    assert core.OWNER_MARKER not in order
+    unlink.locked = False
+    res = mgr.purge_trash()
+    monkeypatch.undo()
+    assert res.ok, res.message
+    assert not tomb.exists()
+    assert order[-1] == core.OWNER_MARKER, "ownership marker must be the last thing removed"
+
+
+def test_s8g_restored_and_preserved_envs_carry_no_marker(shared_mgr, monkeypatch):
+    m = shared_mgr
+    assert m.clone("base", "markerless").ok
+    from envwarden.backend import Backend
+    monkeypatch.setattr(Backend, "venv_argv", lambda self, t, p="": [sys.executable, "-c", "raise SystemExit(5)"])
+    res = m.recreate("markerless")
+    monkeypatch.undo()
+    assert not res.ok and "restored" in res.message
+    assert not (m.paths.envs / "markerless" / core.OWNER_MARKER).exists()
 
 
 # S12 — the ORIGINAL env kept aside by a blocked rollback must never be auto-purged
@@ -117,6 +220,7 @@ def test_s12_blocked_rollback_preserves_original_forever(shared_mgr, monkeypatch
     assert kept and kept[-1]["env"] == "keepme"
     tomb = Path(kept[-1]["path"])
     assert (tomb / "pyvenv.cfg").exists()
+    assert not (tomb / core.OWNER_MARKER).exists(), "preserved original must not be matchable as trash"
     assert not any(isinstance(t, dict) and t.get("path") == str(tomb) for t in m._registry_data().get("trash", []))
     m.purge_trash()
     assert (tomb / "pyvenv.cfg").exists(), "start-up purge deleted the preserved original"

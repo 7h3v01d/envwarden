@@ -1,5 +1,32 @@
 # Changelog
 
+## 4.2.2 — 2026-10-23
+
+Follow-up from the second adversarial review (of 4.2.1). Reproduced before fixing.
+
+### Fixed
+- **S8 (residual, medium):** 4.2.1's trash checks established that a folder *looked like* an EnvWarden tomb,
+  not that EnvWarden made it. A venv-shaped folder (`pyvenv.cfg`, `lib/…`) with a correctly formed name and a
+  plausible registry record was still deleted (reproduced). The 4.2.1 notes below said records "carry
+  provenance"; strictly, they carried provenance *claims*.
+  Now every retired folder is stamped with a random 256-bit token (`secrets.token_hex(32)`, never derived
+  from path or time), written inside the tomb as `.envwarden-owner.json` and in the registry record. Purge
+  additionally requires: a regular-file marker (not a symlink), format 1, a constant-time token match, and the
+  marker's recorded original equal to the registry's. Any mismatch refuses the delete.
+- The ownership marker is removed **last**: if a locked file stops a delete midway, the marker survives with
+  the leftovers so a later purge can still prove ownership (otherwise genuine leftovers could never be
+  cleaned up, or a weaker check would be needed).
+- A rolled-back recreate removes the marker from the restored environment, and a preserved original has its
+  marker removed so no trash record can ever match it.
+- Trash records written by 4.2.1 have no token and are now refused (reported at start-up; remove by hand).
+
+### Tests
+- S8c forged venv-shaped tomb without token survives (the reviewer's exact case) · S8d wrong token survives ·
+  S8e right token, wrong original survives · S8e2 symlinked marker survives · S8f genuine tomb is deleted,
+  marker strictly last, and survives a locked partial delete · S8g restored env carries no marker ·
+  S12 preserved original carries no marker. Revert harness 52/52.
+
+
 ## 4.2.1 — 2026-10-23
 
 Fixes from an external adversarial review of 4.2.0. Every finding was reproduced against the code before

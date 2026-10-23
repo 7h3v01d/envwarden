@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import secrets
 import shutil
 import stat
 import subprocess
@@ -128,10 +129,12 @@ def dir_size_mb(path: Path) -> float:
 
 
 TRASH_MARK = ".envwarden-trash-"
+OWNER_MARKER = ".envwarden-owner.json"
+TOKEN_RE = re.compile(r"[0-9a-f]{64}")
 TOMB_NAME = re.compile(r"\.[^/\\]+" + re.escape(TRASH_MARK) + r"\d{8}-\d{6}-\d{3}")
 # everything a venv may contain at top level (lower-cased); anything else means "not ours"
 VENV_TOP_LEVEL = {"pyvenv.cfg", "lib", "lib64", "bin", "scripts", "include", "share", "etc", "man",
-                  "cachedir.tag", ".gitignore", ".lock", "pyvenv.cfg.tmp", "conda-meta"}
+                  "cachedir.tag", ".gitignore", ".lock", "pyvenv.cfg.tmp", "conda-meta", OWNER_MARKER}
 
 
 class EnvInUseError(OSError):
@@ -180,8 +183,12 @@ def _force_rmtree(path: Path) -> list[str]:
     return leftovers
 
 
-def _retire(path: Path) -> Path:
-    """Atomically move a venv folder aside. Fails (nothing changed) if it is in use on Windows."""
+def _retire(path: Path) -> tuple[Path, str]:
+    """Atomically move a venv folder aside and stamp it with a random ownership token.
+
+    Fails (nothing changed) if the folder is in use on Windows. Returns (tomb, token);
+    token is '' if the marker could not be written — such a tomb is never auto-purged.
+    """
     tomb = path.with_name(f".{path.name}{TRASH_MARK}{_stamp()}")
     try:
         os.rename(path, tomb)
@@ -189,7 +196,55 @@ def _retire(path: Path) -> Path:
         raise EnvInUseError(exc.errno or 0,
                             f"'{path}' is in use (close any Python, shell, IDE or terminal using it) — {exc.strerror or exc}",
                             str(path)) from exc
-    return tomb
+    token = secrets.token_hex(32)  # random: never derived from path or time
+    marker = {"format": 1, "token": token, "original": str(path), "created": _now()}
+    try:
+        fd = os.open(tomb / OWNER_MARKER, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(marker, fh)
+    except OSError:
+        token = ""
+    return tomb, token
+
+
+def _drop_marker(folder: Path) -> None:
+    try:
+        (folder / OWNER_MARKER).unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def _purge_tomb(tomb: Path) -> list[str]:
+    """Delete a tomb, removing its ownership marker LAST.
+
+    If something inside is locked, the marker survives with the leftovers, so a
+    later purge can still prove the folder is ours. Returns leftover paths.
+    """
+    if not os.path.lexists(tomb):
+        return []
+    leftovers: list[str] = []
+    try:
+        entries = list(os.scandir(tomb))
+    except OSError:
+        return [str(tomb)]
+    for e in entries:
+        if e.name == OWNER_MARKER:
+            continue
+        if e.is_dir(follow_symlinks=False):
+            leftovers += _force_rmtree(Path(e.path))
+        else:
+            try:
+                os.unlink(e.path)
+            except OSError:
+                leftovers.append(e.path)
+    if leftovers:
+        return leftovers
+    try:
+        (tomb / OWNER_MARKER).unlink(missing_ok=True)
+        os.rmdir(tomb)
+    except OSError:
+        return [str(tomb)]
+    return []
 
 
 class BusyError(RuntimeError):
@@ -568,17 +623,19 @@ class EnvManager:
 
     def _remove_venv_dir(self, path: Path, kind: str = "") -> None:
         """Retire then purge. Raises EnvInUseError with nothing changed if the env is busy."""
-        tomb = _retire(path)
-        left = _force_rmtree(tomb)
+        tomb, token = _retire(path)
+        left = _purge_tomb(tomb)
         if left:
-            self._remember_trash(tomb, path, kind or ("managed" if is_within(path, self.paths.envs) else "project"))
+            self._remember_trash(tomb, path, kind or ("managed" if is_within(path, self.paths.envs) else "project"),
+                                 token)
 
-    def _remember_trash(self, tomb: Path, original: Path, kind: str) -> None:
-        """Record a retired folder for a later purge — with provenance, never just a path."""
+    def _remember_trash(self, tomb: Path, original: Path, kind: str, token: str) -> None:
+        """Record a retired folder for a later purge. The token must match the marker inside the tomb."""
         data = self._registry_data()
         trash = [t for t in data.get("trash", []) if isinstance(t, (str, dict))]
         if not any(isinstance(t, dict) and t.get("path") == str(tomb) for t in trash):
-            trash.append({"path": str(tomb), "original": str(original), "kind": kind, "created": _now()})
+            trash.append({"path": str(tomb), "original": str(original), "kind": kind, "created": _now(),
+                          "token": token})
         data["trash"] = trash
         self._write_json(self.paths.registry, data)
 
@@ -617,6 +674,31 @@ class EnvManager:
         unexpected = sorted(names - VENV_TOP_LEVEL)
         if unexpected:
             return f"contains non-venv entries: {', '.join(unexpected[:5])}"
+        return self._ownership_refusal(entry, tomb)
+
+    @staticmethod
+    def _ownership_refusal(entry: dict[str, Any], tomb: Path) -> str:
+        """Proof the folder is the one EnvWarden retired: its marker holds the same random token."""
+        token = entry.get("token")
+        if not isinstance(token, str) or not TOKEN_RE.fullmatch(token):
+            return "record has no ownership token (made before 4.2.2, or the marker could not be written)"
+        marker = tomb / OWNER_MARKER
+        try:
+            st = os.lstat(marker)
+        except OSError:
+            return "ownership marker missing"
+        if not stat.S_ISREG(st.st_mode) or st.st_size > 4096:
+            return "ownership marker is not a small regular file"
+        try:
+            data = json.loads(marker.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return "ownership marker unreadable"
+        if not isinstance(data, dict) or data.get("format") != 1 or not isinstance(data.get("token"), str):
+            return "ownership marker malformed"
+        if not secrets.compare_digest(data["token"], token):
+            return "ownership token does not match"
+        if os.path.normcase(str(data.get("original", ""))) != os.path.normcase(entry["original"]):
+            return "ownership marker names a different original"
         return ""
 
     @mutating
@@ -639,7 +721,7 @@ class EnvManager:
                 self.audit.record("PURGE_TRASH", "refused", reason, path=str(label))
                 continue
             tomb = Path(entry["path"])
-            if tomb.is_dir() and _force_rmtree(tomb):
+            if tomb.is_dir() and _purge_tomb(tomb):
                 remaining.append(entry)  # still locked; retry next time
             else:
                 removed += 1
@@ -1395,7 +1477,7 @@ class EnvManager:
             if python and not override and not Path(python).exists() and self.backend.kind == "uv":
                 python = ".".join(python.split(".")[:2])  # let uv pick/download the matching minor
             try:
-                tomb = _retire(guarded)  # old env kept intact until the new one is proven
+                tomb, token = _retire(guarded)  # old env kept intact until the new one is proven
             except EnvInUseError as exc:
                 self.audit.record("RECREATE_ENV", "in-use", exc.strerror or str(exc), name=name)
                 return OpResult(False, f"Nothing was changed. {exc.strerror or exc}")
@@ -1403,12 +1485,15 @@ class EnvManager:
             def rollback(reason: str) -> OpResult:
                 left = _force_rmtree(guarded)
                 if left:
-                    # new folder can't be cleared — keep the ORIGINAL safe beside it (never auto-purged)
+                    # new folder can't be cleared — keep the ORIGINAL safe beside it (never auto-purged);
+                    # drop its ownership marker so no trash record can ever match it
+                    _drop_marker(tomb)
                     self._remember_preserved(tomb, guarded, name)
                     self.audit.record("RECREATE_ENV", "failed", reason[-300:], name=name, rollback="blocked")
                     return OpResult(False, f"Recreate failed and the new folder could not be removed; the original "
                                            f"environment is preserved at {tomb}.\n\n{reason}")
                 os.rename(tomb, guarded)
+                _drop_marker(guarded)  # restored env must not carry a tomb marker
                 self.audit.record("RECREATE_ENV", "rolled-back", reason[-300:], name=name)
                 return OpResult(False, f"Recreate failed — the original environment was restored unchanged.\n\n{reason}")
 
@@ -1426,8 +1511,8 @@ class EnvManager:
                 msg.append(out)
                 if not okp and info.health != "bad":
                     return rollback(out)  # old env worked: don't swap it for a half-installed one
-            if _force_rmtree(tomb):
-                self._remember_trash(tomb, guarded, "recreate")
+            if _purge_tomb(tomb):
+                self._remember_trash(tomb, guarded, "recreate", token)
             self._history(name, "recreate", source=source, python=python or "default")
             self.audit.record("RECREATE_ENV", "success" if okp else "partial", str(guarded), name=name,
                               snapshot=snap_id, packages=len(lines))

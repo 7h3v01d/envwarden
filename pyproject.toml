@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "envwarden"
-version = "4.2.1"
+version = "4.2.2"
 description = "Governed Python virtual-environment manager (uv-first, PyQt6)"
 readme = "README.md"
 requires-python = ">=3.11"

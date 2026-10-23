@@ -46,8 +46,10 @@ Author: Leon Priest · GitHub [7h3v01d](https://github.com/7h3v01d) · Apache-2.
   - Destructive actions require typing the env name; the package box refuses pip options, URLs and paths.
   - Deletes: managed envs only inside the managed store; project/external venvs only when explicitly asked,
     and only if the folder is a real venv that is not a project root, home, workspace or drive root.
-    Leftovers from interrupted deletes are only purged when their recorded provenance and contents prove
-    they are EnvWarden's own — anything doubtful is left on disk and reported.
+    Leftovers from interrupted deletes are only purged when ownership is *proven*: each retired folder gets
+    a random 256-bit token written both inside it (`.envwarden-owner.json`, removed last) and in the
+    registry, and purge requires the tokens and the recorded original to match, on top of name, location,
+    no-symlink and venv-contents checks. Anything doubtful is left on disk and reported.
   - The first dependency sync of each project asks you to trust it (installing can run its build code).
 - **Hash-chained audit log** (`audit.jsonl`) with a *Verify chain* button. It is **tamper-evident**: it
   detects accidental damage, truncation, partial edits and concurrent-writer corruption. It is **not**
@@ -146,6 +148,7 @@ Locally: `test.bat` (set `ENVWARDEN_NETWORK_TESTS=1` to include the live checks)
 `tests/test_regressions.py` holds one test per defect fixed from the previous version (R1–R11);
 `tests/test_projects.py` covers project-local venv management (P1–P8), `tests/test_safety.py`
 delete/recreate safety (S1–S7), `tests/test_locks.py` lock files, drift and sync (L1–L10) and
-`tests/test_hardening.py` the fixes from the 4.2.0 adversarial review (S8–S13, R12–R13, T1, N3–N4).
+`tests/test_hardening.py` the fixes from the 4.2.0 and 4.2.1 adversarial reviews (S8–S13, R12–R13, T1,
+N3–N4).
 `tests/revert_check.py` re-introduces each defect in a temp copy and requires its test to fail —
-currently 45/45 caught (R1–R13, P1–P8, S1–S13, L1–L10, T1, N3–N4). Suite runs on both uv and pip backends and on Python 3.11+.
+currently 52/52 caught (R1–R13, P1–P8, S1–S13 incl. S8c–S8g, L1–L10, T1, N3–N4). Suite runs on both uv and pip backends and on Python 3.11+.

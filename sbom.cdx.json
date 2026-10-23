@@ -2,9 +2,9 @@
   "bomFormat": "CycloneDX",
   "specVersion": "1.5",
   "version": 1,
-  "serialNumber": "urn:uuid:3bfe4c2a-b93c-4eb1-8b06-484ac5260beb",
+  "serialNumber": "urn:uuid:cca91f7f-cbaf-45cd-8420-3c9965ec4a02",
   "metadata": {
-    "timestamp": "2026-10-23T02:51:38.708087061Z",
+    "timestamp": "2026-10-23T03:13:57.757696600Z",
     "tools": [
       {
         "vendor": "Astral Software Inc.",
@@ -14,9 +14,9 @@
     ],
     "component": {
       "type": "library",
-      "bom-ref": "envwarden-1@4.2.1",
+      "bom-ref": "envwarden-1@4.2.2",
       "name": "envwarden",
-      "version": "4.2.1",
+      "version": "4.2.2",
       "properties": [
         {
           "name": "uv:package:is_project_root",
@@ -57,7 +57,7 @@
   ],
   "dependencies": [
     {
-      "ref": "envwarden-1@4.2.1",
+      "ref": "envwarden-1@4.2.2",
       "dependsOn": [
         "packaging-2@26.3",
         "pyqt6-3@6.11.0"

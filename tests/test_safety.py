@@ -141,19 +141,14 @@ def test_s5_leftover_trash_is_tracked_and_purged(shared_mgr, monkeypatch):
     assert m.clone("base", "sticky").ok
     real_unlink = os.unlink
 
-    def unlink(p, *a, **k):
-        if Path(os.fsdecode(p)).name == "pyvenv.cfg" and core.TRASH_MARK in os.fsdecode(p):
-            raise PermissionError(13, "in use", os.fsdecode(p))
-        return real_unlink(p, *a, **k)
-
-    if os.path.exists("/proc/self/fd"):
-        # rmtree uses dir_fd unlink on Linux: path is relative there, so match by name only
-        def unlink(p, *a, dir_fd=None, **k):  # noqa: F811
-            if Path(os.fsdecode(p)).name == "pyvenv.cfg" and dir_fd is not None:
-                parent = os.readlink(f"/proc/self/fd/{dir_fd}")
-                if core.TRASH_MARK in parent:
-                    raise PermissionError(13, "in use", os.fsdecode(p))
-            return real_unlink(p, *a, dir_fd=dir_fd, **k)
+    def unlink(p, *a, dir_fd=None, **k):
+        """pyvenv.cfg inside a tomb is 'in use' — whether unlinked by full path or via dir_fd."""
+        full = os.fsdecode(p)
+        if dir_fd is not None and os.path.exists("/proc/self/fd"):
+            full = os.path.join(os.readlink(f"/proc/self/fd/{dir_fd}"), full)
+        if Path(full).name == "pyvenv.cfg" and core.TRASH_MARK in full:
+            raise PermissionError(13, "in use", full)
+        return real_unlink(p, *a, dir_fd=dir_fd, **k) if dir_fd is not None else real_unlink(p, *a, **k)
 
     monkeypatch.setattr(os, "unlink", unlink)
     res = m.delete("sticky")
@@ -162,6 +157,9 @@ def test_s5_leftover_trash_is_tracked_and_purged(shared_mgr, monkeypatch):
     trash = m._registry_data().get("trash", [])
     assert trash and core.TRASH_MARK in trash[0]["path"]
     assert trash[0]["original"].endswith("sticky") and trash[0]["kind"] == "managed"
+    tomb = Path(trash[0]["path"])
+    assert (tomb / core.OWNER_MARKER).exists(), "marker must survive a partial delete (deleted last)"
+    assert len(trash[0]["token"]) == 64
     assert m.purge_trash().ok
     assert not Path(trash[0]["path"]).exists() and m._registry_data()["trash"] == []
 
